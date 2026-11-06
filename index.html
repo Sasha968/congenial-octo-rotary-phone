@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ракетомодель - Симулятор</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #0a0a1e;
+            color: #e6e6f0;
+            font-family: 'Consolas', 'Courier New', monospace;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            height: 100vh;
+        }
+        #gameCanvas {
+            background: linear-gradient(to bottom, #050514 0%, #64aae6 100%);
+            border: 2px solid #50b4ff;
+            margin-top: 10px;
+            box-shadow: 0 0 20px rgba(80, 180, 255, 0.3);
+        }
+        #ui {
+            width: 800px;
+            display: flex;
+            justify-content: space-between;
+            padding: 10px;
+            background: #141928;
+            border: 1px solid #50b4ff;
+            border-top: none;
+            box-sizing: border-box;
+        }
+        .stat-box {
+            text-align: left;
+        }
+        .stat-box h3 {
+            margin: 0 0 5px 0;
+            color: #50b4ff;
+            font-size: 14px;
+        }
+        .stat-box p {
+            margin: 2px 0;
+            font-size: 13px;
+        }
+        #controls-hint {
+            text-align: right;
+            color: #aaa;
+            font-size: 12px;
+        }
+        #message {
+            position: absolute;
+            top: 40%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-size: 32px;
+            font-weight: bold;
+            color: #ff6464;
+            text-shadow: 2px 2px 4px #000;
+            display: none;
+            text-align: center;
+        }
+    </style>
+</head>
+<body>
+
+    <canvas id="gameCanvas" width="800" height="500"></canvas>
+    
+    <div id="ui">
+        <div class="stat-box">
+            <h3>📊 ТЕЛЕМЕТРИЯ</h3>
+            <p>Высота: <span id="alt">0</span> м</p>
+            <p>Скорость: <span id="speed">0</span> м/с</p>
+            <p>Топливо: <span id="fuel">100</span>%</p>
+            <p>Тяга: <span id="thrust">0</span>%</p>
+        </div>
+        <div id="controls-hint">
+            <h3>🎮 УПРАВЛЕНИЕ</h3>
+            <p>W или ↑ — Двигатель</p>
+            <p>A / D или ← / → — Наклон</p>
+            <p>R — Перезапуск</p>
+        </div>
+    </div>
+
+    <div id="message"></div>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const msgEl = document.getElementById('message');
+
+        // Физические константы
+        const GRAVITY = 9.81;
+        const DRAG = 0.001;
+        const SCALE = 2; // пикселей на метр
+
+        // Состояние игры
+        let rocket = {
+            x: 400,
+            y: 450,
+            vx: 0,
+            vy: 0,
+            angle: 0, // в градусах, 0 = вверх
+            fuel: 100,
+            maxFuel: 100,
+            mass: 1000, // кг
+            dryMass: 400, // кг
+            thrust: 25000, // Н
+            fuelRate: 20, // % в секунду
+            isThrusting: false,
+            alive: true,
+            maxAlt: 0,
+            maxSpeed: 0,
+            flightTime: 0
+        };
+
+        let cameraY = 0;
+        let keys = {};
+
+        // Управление
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key.toLowerCase() === 'r') resetGame();
+        });
+        window.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+
+        function resetGame() {
+            rocket = {
+                x: 400, y: 450, vx: 0, vy: 0, angle: 0,
+                fuel: 100, maxFuel: 100, mass: 1000, dryMass: 400,
+                thrust: 25000, fuelRate: 20, isThrusting: false,
+                alive: true, maxAlt: 0, maxSpeed: 0, flightTime: 0
+            };
+            cameraY = 0;
+            msgEl.style.display = 'none';
+        }
+
+        function update(dt) {
+            if (!rocket.alive) return;
+
+            rocket.flightTime += dt;
+
+            // Управление
+            if (keys['w'] || keys['arrowup']) {
+                rocket.isThrusting = true;
+            } else {
+                rocket.isThrusting = false;
+            }
+
+            if (keys['a'] || keys['arrowleft']) rocket.angle -= 60 * dt;
+            if (keys['d'] || keys['arrowright']) rocket.angle += 60 * dt;
+
+            // Ограничение угла
+            rocket.angle = Math.max(-45, Math.min(45, rocket.angle));
+
+            // Расход топлива и тяга
+            let currentThrust = 0;
+            if (rocket.isThrusting && rocket.fuel > 0) {
+                rocket.fuel -= rocket.fuelRate * dt;
+                if (rocket.fuel < 0) rocket.fuel = 0;
+                currentThrust = rocket.thrust;
+            }
+
+            // Масса зависит от топлива
+            let fuelMass = (rocket.fuel / rocket.maxFuel) * (rocket.mass - rocket.dryMass);
+            let currentMass = rocket.dryMass + fuelMass;
+
+            // Ускорение от тяги
+            let rad = (rocket.angle - 90) * Math.PI / 180; // -90 потому что 0 это вверх, а в canvas 0 это вправо
+            let axThrust = (currentThrust / currentMass) * Math.cos(rad);
+            let ayThrust = (currentThrust / currentMass) * Math.sin(rad);
+
+            // Гравитация (вниз, значит +y в canvas, но мы считаем в метрах, где вверх это +y)
+            // Переведём в систему координат canvas: Y растёт вниз.
+            // Поэтому гравитация = +GRAVITY, тяга вверх = -ayThrust
+            
+            let speed = Math.sqrt(rocket.vx**2 + rocket.vy**2);
+            let dragForce = DRAG * speed * speed * currentMass;
+            let axDrag = speed > 0 ? -dragForce * (rocket.vx / speed) / currentMass : 0;
+            let ayDrag = speed > 0 ? -dragForce * (rocket.vy / speed) / currentMass : 0;
+
+            rocket.vx += (axThrust + axDrag) * dt;
+            rocket.vy += (ayThrust + GRAVITY + ayDrag) * dt; // GRAVITY положительная, т.к. Y растёт вниз
+
+            rocket.x += rocket.vx * dt * SCALE;
+            rocket.y += rocket.vy * dt * SCALE;
+
+            // Статистика
+            let alt = Math.max(0, (450 - rocket.y) / SCALE);
+            rocket.maxAlt = Math.max(rocket.maxAlt, alt);
+            rocket.maxSpeed = Math.max(rocket.maxSpeed, speed);
+
+            // Столкновение с землёй
+            if (rocket.y >= 450) {
+                rocket.y = 450;
+                if (Math.abs(rocket.vy) > 15 || Math.abs(rocket.vx) > 10 || Math.abs(rocket.angle) > 15) {
+                    rocket.alive = false;
+                    msgEl.innerText = "💥 КРУШЕНИЕ! (Нажми R)";
+                    msgEl.style.display = 'block';
+                } else {
+                    rocket.vx = 0;
+                    rocket.vy = 0;
+                    rocket.angle = 0;
+                    if (rocket.maxAlt > 100) {
+                        msgEl.innerText = "✅ УСПЕШНАЯ ПОСАДКА! (Нажми R)";
+                        msgEl.style.color = '#64e678';
+                        msgEl.style.display = 'block';
+                    }
+                }
+            }
+
+            // Камера следит за ракетой
+            let targetCam = Math.max(0, rocket.y - 250);
+            cameraY += (targetCam - cameraY) * 0.1;
+
+            // Обновление UI
+            document.getElementById('alt').innerText = alt.toFixed(1);
+            document.getElementById('speed').innerText = speed.toFixed(1);
+            document.getElementById('fuel').innerText = rocket.fuel.toFixed(1);
+            document.getElementById('thrust').innerText = rocket.isThrusting && rocket.fuel > 0 ? '100' : '0';
+        }
+
+        function draw() {
+            // Очистка
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            // Небо (градиент меняется с высотой)
+            let altRatio = Math.min(1, rocket.maxAlt / 10000);
+            let r = Math.floor(5 + (100 - 5) * (1 - altRatio));
+            let g = Math.floor(5 + (170 - 5) * (1 - altRatio));
+            let b = Math.floor(20 + (230 - 20) * (1 - altRatio));
+            ctx.fillStyle = `rgb(${r},${g},${b})`;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // Звёзды (появляются в космосе)
+            if (altRatio > 0.5) {
+                ctx.fillStyle = '#ffffff';
+                for (let i = 0; i < 50; i++) {
+                    let sx = (i * 137.5) % canvas.width;
+                    let sy = (i * 71.3) % (canvas.height / 2);
+                    ctx.fillRect(sx, sy, 2, 2);
+                }
+            }
+
+            // Земля
+            let groundY = 450 - cameraY;
+            if (groundY < canvas.height) {
+                ctx.fillStyle = '#463728';
+                ctx.fillRect(0, groundY, canvas.width, canvas.height - groundY);
+                ctx.fillStyle = '#64e678';
+                ctx.fillRect(0, groundY, canvas.width, 4); // трава
+            }
+
+            // Ракета
+            ctx.save();
+            ctx.translate(rocket.x, rocket.y - cameraY);
+            ctx.rotate(rocket.angle * Math.PI / 180);
+
+            // Пламя
+            if (rocket.isThrusting && rocket.fuel > 0) {
+                ctx.fillStyle = '#ffa01e';
+                ctx.beginPath();
+                ctx.moveTo(-8, 20);
+                ctx.lineTo(0, 20 + Math.random() * 25 + 10);
+                ctx.lineTo(8, 20);
+                ctx.fill();
+                
+                ctx.fillStyle = '#ffff96';
+                ctx.beginPath();
+                ctx.moveTo(-4, 20);
+                ctx.lineTo(0, 20 + Math.random() * 15 + 5);
+                ctx.lineTo(4, 20);
+                ctx.fill();
+            }
+
+            // Корпус
+            ctx.fillStyle = '#e6e6f0';
+            ctx.fillRect(-10, -25, 20, 45);
+            
+            // Нос
+            ctx.fillStyle = '#c83232';
+            ctx.beginPath();
+            ctx.moveTo(-10, -25);
+            ctx.lineTo(0, -45);
+            ctx.lineTo(10, -25);
+            ctx.fill();
+
+            // Двигатель
+            ctx.fillStyle = '#5a5a64';
+            ctx.fillRect(-12, 20, 24, 8);
+
+            // Иллюминатор
+            ctx.fillStyle = '#50b4ff';
+            ctx.beginPath();
+            ctx.arc(0, -5, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            ctx.restore();
+        }
+
+        let lastTime = 0;
+        function gameLoop(timestamp) {
+            let dt = (timestamp - lastTime) / 1000;
+            if (dt > 0.1) dt = 0.1; // защита от лагов
+            lastTime = timestamp;
+
+            update(dt);
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>
